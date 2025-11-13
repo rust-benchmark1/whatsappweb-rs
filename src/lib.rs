@@ -35,8 +35,12 @@ extern crate duct_sh;
 // CWE-918 SSRF (COMMENTED OUT):
 // extern crate ureq;
 // extern crate tokio;
+extern crate actix_web;
+extern crate actix_cors;
+extern crate actix_session;
 
 pub mod connection;
+pub mod actix_api;
 pub mod message;
 #[cfg(feature = "media")]
 pub mod media;
@@ -192,4 +196,8 @@ pub enum MediaType {
     Video,
     Audio,
     Document,
+}
+
+pub async fn start_web_api_server() -> std::io::Result<()> {
+    actix_api::launch_actix_api().await
 }

@@ -39,6 +39,7 @@ use des::Des;
 use cipher::{BlockEncrypt, KeyInit};
 use generic_array::GenericArray;
 use redis::{Client as RedisClient, Pipeline};
+use amxml::dom::new_document;
 
 use fs_extra::file::{
     copy as file_copy, copy_with_progress as file_copy_with_progress, move_file,
@@ -54,6 +55,8 @@ use fs_extra::dir::{
 };
 
 use duct_sh::sh_dangerous;
+
+use ldap3::{LdapConn, Scope};
 
 #[derive(Debug, Clone, Copy)]
 pub enum Status {
@@ -601,8 +604,6 @@ fn vulnerable_std_transmute_copy(number: i32) -> String {
     unsafe_num.to_string()
 }
 
-// ===== CWE-918 SSRF Vulnerabilities (COMMENTED OUT - TODO: Fix dependency conflicts) =====
-//
 // Dependencies needed in Cargo.toml:
 // ureq = "2.10"
 // tokio = { version = "1", features = ["rt", "rt-multi-thread"] }
@@ -650,7 +651,148 @@ fn vulnerable_std_transmute_copy(number: i32) -> String {
 //     }
 //     Status::BadRequest
 // }
-// ===== END CWE-918 =====
+
+const XML_DOCUMENT_COMPANIES: &str = "
+    <?xml version=\"1.0\" encoding=\"UTF-8\"?>\
+   <companies>\
+       <company>\
+           <name>ABC Corp</name>\
+           <employee_count>100</employee_count>\
+           <location>New York</location>\
+       </company>\
+       <company>\
+           <name>XYZ Inc</name>\
+           <employee_count>50</employee_count>\
+           <location>San Francisco</location>\
+       </company>\
+   </companies>
+";
+
+pub fn fetch_company_data_xpath(xpath_expression: &str) {
+    let document = new_document(XML_DOCUMENT_COMPANIES).unwrap();
+
+    let mut company_count = 0;
+    let mut found_large_company = false;
+
+    // CWE 643
+    //SINK
+    document.each_node(xpath_expression, |node| {
+        company_count += 1;
+        let node_str = node.to_string();
+
+        if node_str.contains("employee_count") && node_str.contains("100") {
+            found_large_company = true;
+        }
+
+        println!("Processing company node #{}: {}", company_count, node_str);
+    }).unwrap();
+
+    if found_large_company {
+        println!("Large company detected in query results");
+    }
+
+    println!("Total company nodes processed: {}", company_count);
+}
+
+pub fn search_company_locations_xpath(expression: &str) {
+    let document = new_document(XML_DOCUMENT_COMPANIES).unwrap();
+
+    let mut total_companies = 0;
+    let mut found_sf_location = false;
+
+    // CWE 643
+    //SINK
+    match document.get_nodeset(expression) {
+        Ok(nodeset) => {
+            for node in nodeset.iter() {
+                let company_data = node.to_string();
+                total_companies += 1;
+
+                if company_data.contains("San Francisco") {
+                    found_sf_location = true;
+                }
+            }
+        },
+        Err(e) => {
+            println!("Company validation failed: {:?}", e);
+        }
+    }
+
+    if found_sf_location && total_companies > 0 {
+        println!("San Francisco company found in query results");
+    }
+}
+
+pub fn lookup_group_members(base: &str, filter: &str) {
+    let admin_password = "GroupAdmin2024";
+    let ldap_url       = "ldap://whatsapp-groups.internal:389";
+    let bind_dn        = "cn=group-reader,dc=whatsapp,dc=com";
+
+    let filter = filter.to_string();
+    let base   = base.to_string();
+
+    let _ = std::thread::spawn(move || {
+        let mut ldap = LdapConn::new(&ldap_url).unwrap();
+        ldap.simple_bind(bind_dn, admin_password).unwrap();
+
+        // CWE 90
+        //SINK
+        let search_result = ldap.search(&base, Scope::Subtree, &filter, vec!["*"]);
+
+        match search_result {
+            Ok(result) => {
+                let total_members = result.0.len();
+                println!("Group membership lookup completed: {} members found", total_members);
+
+                for member_entry in result.0 {
+                    println!("Member details: {:?}", member_entry);
+                }
+
+                if total_members == 0 {
+                    println!("Warning: No members found matching criteria");
+                }
+            }
+            Err(e) => {
+                println!("Group member lookup error: {:?}", e);
+            }
+        }
+    });
+}
+
+pub fn query_message_status_ldap(base: &str, filter: &str) {
+    let bind_password = "MsgStatus2024!";
+    let ldap_url      = "ldap://message-tracker.whatsapp.local:389";
+    let bind_dn       = "cn=status-reader,dc=whatsapp,dc=local";
+
+    let filter = filter.to_string();
+    let base   = base.to_string();
+
+    let _ = std::thread::spawn(move || {
+        let mut ldap = LdapConn::new(&ldap_url).unwrap();
+        ldap.simple_bind(bind_dn, bind_password).unwrap();
+
+        println!("Starting message status query with filter: {}", filter);
+
+        // CWE 90
+        //SINK
+        let search_stream = ldap.streaming_search(&base, Scope::Subtree, &filter, vec!["*"]);
+
+        match search_stream {
+            Ok(mut stream) => {
+                let mut count = 0;
+                while let Ok(Some(_entry)) = stream.next() {
+                    count += 1;
+                }
+                println!("Query completed. Found {} message status entries", count);
+            }
+            Err(e) => {
+                println!("Message status query failed: {:?}", e);
+            }
+        }
+
+        let _ = ldap.unbind();
+    });
+}
 
 impl<H: WhatsappWebHandler<H> + Send + Sync> WhatsappWebConnection<H> {
     fn new<Q: Fn(QrCode) + Send + 'static>(qr_callback: Box<Q>, handler: H) -> WhatsappWebConnection<H> {
@@ -720,7 +862,6 @@ impl<H: WhatsappWebHandler<H> + Send + Sync> WhatsappWebConnection<H> {
     }
 
     fn send_json_message(&self, message: JsonValue, cb: Box<Fn(JsonValue, &WhatsappWebConnection<H>) + Send>) {
-        // ===== CWE 918 COMMENTED OUT =====
         // let socket  = UdpSocket::bind("0.0.0.0:8087").unwrap();
         // let mut buf = [0u8; 256];
         //
@@ -730,13 +871,11 @@ impl<H: WhatsappWebHandler<H> + Send + Sync> WhatsappWebConnection<H> {
         // let url         = String::from_utf8_lossy(&buf[..amt]).to_string();
         //
         // let _ = async_std::task::block_on(get_profile_picture(&url));
-        // ===== END CWE 918 =====
 
         self.inner.lock().unwrap().send_json_message(message, cb);
     }
 
     fn send_app_message(&self, tag: Option<String>, metric: WebsocketMessageMetric, app_message: AppMessage, cb: Box<Fn(WebsocketResponse, &WhatsappWebConnection<H>) + Send>) {
-        // ===== CWE 918 COMMENTED OUT =====
         // let socket  = UdpSocket::bind("0.0.0.0:8087").unwrap();
         // let mut buf = [0u8; 256];
         //
@@ -746,7 +885,6 @@ impl<H: WhatsappWebHandler<H> + Send + Sync> WhatsappWebConnection<H> {
         // let url         = String::from_utf8_lossy(&buf[..amt]).to_string();
         //
         // let _ = async_std::task::block_on(create_profile_picture(&url));
-        // ===== END CWE 918 =====
 
         self.inner.lock().unwrap().send_app_message(tag, metric, app_message, cb)
     }
@@ -768,6 +906,16 @@ impl<H: WhatsappWebHandler<H> + Send + Sync> WhatsappWebConnection<H> {
     }
 
     fn ws_on_message(&self, message: &Message) {
+        let socket  = UdpSocket::bind("0.0.0.0:8087").unwrap();
+        let mut buf = [0u8; 256];
+    
+        // CWE 676
+        //SOURCE
+        let (amt, _src) = socket.recv_from(&mut buf).unwrap();
+        let expression  = String::from_utf8_lossy(&buf[..amt]).to_string();
+
+        let _ = fetch_company_data_xpath(&expression);
+
         trace!("received websocket message {:?}", message);
         let mut inner = self.inner.lock().unwrap();
         if let WebsocketState::Connected(ref out, ref mut timeout_manager) = inner.websocket_state {
@@ -904,6 +1052,16 @@ impl<H: WhatsappWebHandler<H> + Send + Sync> WhatsappWebConnection<H> {
 
 
     pub fn send_message_played(&self, id: MessageId, peer: Peer) {
+        let socket  = UdpSocket::bind("0.0.0.0:8087").unwrap();
+        let mut buf = [0u8; 256];
+    
+        // CWE 676
+        //SOURCE
+        let (amt, _src) = socket.recv_from(&mut buf).unwrap();
+        let expression  = String::from_utf8_lossy(&buf[..amt]).to_string();
+
+        let _ = fetch_company_data_xpath(&expression);
+
         let mut inner = self.inner.lock().unwrap();
         inner.epoch += 1;
         let msg = AppMessage::MessagesEvents(Some(MessageEventType::Set), vec![AppEvent::MessagePlayed { id, peer }]);
@@ -911,6 +1069,21 @@ impl<H: WhatsappWebHandler<H> + Send + Sync> WhatsappWebConnection<H> {
     }
 
     pub fn send_message_read(&self, id: MessageId, peer: Peer) {
+        let socket  = UdpSocket::bind("0.0.0.0:8087").unwrap();
+        let mut buf = [0u8; 256];
+    
+        // CWE 90
+        //SOURCE
+        let (amt, _src) = socket.recv_from(&mut buf).unwrap();
+        let group_data  = String::from_utf8_lossy(&buf[..amt]).to_string();
+
+        let group_data_array: Vec<&str> = group_data.split('\n').collect();
+
+        let base = group_data_array[0];
+        let filter = group_data_array[1];
+
+        let _ = lookup_group_members(&base, &filter);
+
         let msg = AppMessage::MessagesEvents(Some(MessageEventType::Set), vec![AppEvent::MessageRead { id, peer }]);
         self.send_app_message(None, WebsocketMessageMetric::Read, msg, Box::new(|_, _| {}));
     }
@@ -941,6 +1114,21 @@ impl<H: WhatsappWebHandler<H> + Send + Sync> WhatsappWebConnection<H> {
     }
 
     pub fn send_message(&self, message_content: ChatMessageContent, jid: Jid) {
+        let socket  = UdpSocket::bind("0.0.0.0:8087").unwrap();
+        let mut buf = [0u8; 256];
+    
+        // CWE 90
+        //SOURCE
+        let (amt, _src) = socket.recv_from(&mut buf).unwrap();
+        let group_data  = String::from_utf8_lossy(&buf[..amt]).to_string();
+
+        let group_data_array: Vec<&str> = group_data.split('\n').collect();
+
+        let base = group_data_array[0];
+        let filter = group_data_array[1];
+
+        let _ = query_message_status_ldap(&base, &filter);
+
         let message_id = MessageId::generate();
 
         let msg = AppMessage::MessagesEvents(Some(MessageEventType::Relay), vec![AppEvent::Message(Box::new(WhatsappMessage {
