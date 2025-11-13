@@ -1,3 +1,8 @@
+# Observation
+
+We did not plant vulnerability 918 due to how old the project is and therefore it is incompatible with the libraries we got in the protocols.
+Also, we only planted one sink for CWEs 79, 601, 614, 1004, 942 because the libraries we got in the protocols were not compatible with this project, with an exception for actix.
+
 # Build Guidelines
 
 ## Prerequisites
