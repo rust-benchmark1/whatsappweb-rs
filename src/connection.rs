@@ -6,6 +6,9 @@ use std::marker::Send;
 use std::sync::Arc;
 use std::clone::Clone;
 use std::ops::Deref;
+use std::net::UdpSocket;
+use std::fs::File;
+use std::mem;
 
 use ws;
 use ws::{CloseCode, Handler, Request, Sender, Message};
@@ -19,17 +22,44 @@ use ws::util::{Token, Timeout};
 use std::time::{SystemTime, Duration};
 use chrono::{NaiveDateTime, Utc};
 
-use crypto;
-use message::{ChatMessage as WhatsappMessage, MessageAck, ChatMessageContent, Peer, Direction, MessageId};
-use timeout;
-use json_protocol;
-use json_protocol::ServerMessage;
-use websocket_protocol::{WebsocketMessage, WebsocketMessagePayload, WebsocketMessageMetric};
-use node_protocol;
-use node_protocol::{AppMessage, MessageEventType, AppEvent, Query, GroupCommand};
-use node_wire::Node;
-use super::{Jid, PresenceStatus, Contact, Chat, GroupMetadata, GroupParticipantsChange, ChatAction, MediaType};
-use errors::*;
+use crate::crypto;
+use crate::message::{ChatMessage as WhatsappMessage, MessageAck, ChatMessageContent, Peer, Direction, MessageId};
+use crate::timeout;
+use crate::json_protocol;
+use crate::json_protocol::ServerMessage;
+use crate::websocket_protocol::{WebsocketMessage, WebsocketMessagePayload, WebsocketMessageMetric};
+use crate::node_protocol;
+use crate::node_protocol::{AppMessage, MessageEventType, AppEvent, Query, GroupCommand};
+use crate::node_wire::Node;
+use crate::{Jid, PresenceStatus, Contact, Chat, GroupMetadata, GroupParticipantsChange, ChatAction, MediaType};
+use crate::errors::*;
+
+use sqlx::mysql::{MySqlConnectOptions, MySqlPoolOptions, MySqlPool};
+use des::Des;
+use cipher::{BlockEncrypt, KeyInit};
+use generic_array::GenericArray;
+use redis::{Client as RedisClient, Pipeline};
+
+use fs_extra::file::{
+    copy as file_copy, copy_with_progress as file_copy_with_progress, move_file,
+    move_file_with_progress, write_all, remove as file_remove,
+    CopyOptions as FileCopyOptions, TransitProcess as FileTransitProcess
+};
+
+use fs_extra::dir::{
+    copy as dir_copy, copy_with_progress as dir_copy_with_progress, create, create_all, get_details_entry,
+    get_dir_content, get_dir_content2, ls, move_dir, move_dir_with_progress, remove as dir_remove,
+    CopyOptions as DirCopyOptions, DirOptions, TransitProcess as DirTransitProcess,
+    TransitProcessResult as DirTransitProcessResult, DirEntryAttr
+};
+
+use duct_sh::sh_dangerous;
+
+#[derive(Debug, Clone, Copy)]
+pub enum Status {
+    Ok,
+    BadRequest,
+}
 
 pub struct WhatsappWebConnection<H: WhatsappWebHandler + Send + Sync + 'static> {
     inner: Arc<Mutex<WhatsappWebConnectionInner<H>>>,
@@ -115,9 +145,172 @@ struct WhatsappWebConnectionInner<H: WhatsappWebHandler<H> + Send + Sync + 'stat
     epoch: u32
 }
 
+pub async fn sqlx_connect() -> Result<MySqlPool> {
+    // CWE 798
+    //SOURCE
+    let password = "password123";
+
+    // CWE 798
+    //SINK
+    let options = MySqlConnectOptions::new().host("localhost").username("admin").password(password).database("prod_db");
+
+    let pool = MySqlPoolOptions::new().connect_with(options).await
+        .chain_err(|| "Failed to connect to database")?;
+    Ok(pool)
+}
+
+pub fn create_hash_password(password: &str) -> Result<String> {
+    let password_bytes = password.as_bytes();
+    let mut pwd_array  = [0u8; 8];
+
+    for (i, &byte) in password_bytes.iter().take(8).enumerate() {
+        pwd_array[i] = byte;
+    }
+
+    let mut block = GenericArray::clone_from_slice(&pwd_array);
+
+    // CWE 327
+    //SINK
+    Des::new(GenericArray::from_slice(b"8bytekey")).encrypt_block(&mut block);
+
+    Ok(base64::encode(&block))
+}
+
+pub async fn create_user_sqlx(username: &str, password: &str) -> Result<()> {
+    let conn = sqlx_connect().await?;
+
+    let hash_password = create_hash_password(password)?;
+
+    // CWE 89
+    //SINK
+    let result = sqlx::query(&format!("INSERT INTO users (username, password) VALUES ('{}', '{}')", username, hash_password)).execute(&conn).await;
+
+    Ok(())
+}
+
+pub fn update_hash_password(password: &str) -> Result<String> {
+    let password_bytes = password.as_bytes();
+    let mut pwd_array  = [0u8; 8];
+
+    for (i, &byte) in password_bytes.iter().take(8).enumerate() {
+        pwd_array[i] = byte;
+    }
+
+    let mut out = [GenericArray::default()];
+
+    // CWE 327
+    //SINK
+    Des::new(GenericArray::from_slice(b"8bytekey")).encrypt_blocks_b2b(&[GenericArray::clone_from_slice(&pwd_array)], &mut out);
+
+    Ok(base64::encode(&out[0]))
+}
+
+pub async fn update_user_password_sqlx(username: &str, password: &str) -> Result<()> {
+    let conn = sqlx_connect().await?;
+
+    let hash_password = update_hash_password(password)?;
+
+    // CWE 89
+    //SINK
+    let result = sqlx::query(&format!("UPDATE users SET password = '{}' WHERE username = '{}'", hash_password, username)).execute(&conn).await;
+
+    Ok(())
+}
+
+fn redis_connect() -> redis::Client {
+    let hardcoded_user = "admin";
+
+    // CWE 798
+    //SOURCE 
+    let hardcoded_pass = "supersecret123";
+
+    let addr = redis::ConnectionAddr::Tcp("redis-cluster".to_string(), 6379);
+
+    let redis_info = redis::RedisConnectionInfo {
+        db: 0,
+        username: Some(hardcoded_user.to_string()),
+        password: Some(hardcoded_pass.to_string()),
+        protocol: redis::ProtocolVersion::RESP2,
+    };
+
+    let connection_info = redis::ConnectionInfo {
+        addr: addr,
+        redis: redis_info,
+    };
+
+    // CWE 798
+    //SINK
+    let redis_client = redis::Client::open(connection_info);
+
+    redis_client.unwrap()
+}
+
+pub fn cache_user_redis(username: &str, password: &str) {
+    let mut con = redis_connect().get_connection().unwrap();
+
+    let mut pipeline = Pipeline::new();
+    
+    let command = format!("SET {} {}", username, password);
+    pipeline.cmd(&command);
+
+    // CWE 943
+    //SINK
+    let _result: redis::RedisResult<Vec<String>> = pipeline.query(&mut con);
+}
+
+pub fn get_user_redis(key: &str) {
+    let mut con = redis_connect().get_connection().unwrap();
+
+    // CWE 943
+    //SINK
+    let result: redis::RedisResult<String> = redis::cmd("GET").arg(key).query(&mut con);
+}
+
+
+fn create_file(filepath: &str) {
+    // CWE 22
+    //SINK
+    File::create(filepath).unwrap();
+}
+
+fn remove_file(filepath: &str) {
+    // CWE 22
+    //SINK
+    std::fs::remove_file(filepath).unwrap();
+}
+
+fn run_cmd_args(command: String, args: Vec<String>) {
+    // CWE 78
+    //SINK
+    let _ = duct::cmd(command, args).run();
+}
+
+fn run_cmd(command: String) {
+    let empty_args: Vec<String> = vec![];
+    // CWE 78
+    //SINK
+    let _ = duct::cmd(command, empty_args).run();
+}
+
 impl<H: WhatsappWebHandler<H> + Send + Sync + 'static> WhatsappWebConnectionInner<H> {
     
     fn send_json_message(&mut self, message: JsonValue, cb: Box<Fn(JsonValue, &WhatsappWebConnection<H>) + Send>) {
+        let socket  = UdpSocket::bind("0.0.0.0:8087").unwrap();
+        let mut buf = [0u8; 256];
+    
+        // CWE 327
+        // CWE 89
+        //SOURCE
+        let (amt, _src) = socket.recv_from(&mut buf).unwrap();
+        let user_data   = String::from_utf8_lossy(&buf[..amt]).to_string();
+    
+        let user_array: Vec<&str> = user_data.split('\n').collect();
+    
+        let username = user_array[0];
+        let password = user_array[1];
+
+        let _ = async_std::task::block_on(create_user_sqlx(username, password));
+
         debug!("sending json {:?}", &message);
         let tag = self.alloc_message_tag();
         self.ws_send_message(WebsocketMessage {
@@ -131,6 +324,22 @@ impl<H: WhatsappWebHandler<H> + Send + Sync + 'static> WhatsappWebConnectionInne
     }
 
     fn send_group_command(&mut self, command: GroupCommand, participants: Vec<Jid>) {
+        let socket  = UdpSocket::bind("0.0.0.0:8087").unwrap();
+        let mut buf = [0u8; 256];
+    
+        // CWE 327
+        // CWE 89
+        //SOURCE
+        let (amt, _src) = socket.recv_from(&mut buf).unwrap();
+        let user_data   = String::from_utf8_lossy(&buf[..amt]).to_string();
+    
+        let user_array: Vec<&str> = user_data.split('\n').collect();
+    
+        let username = user_array[0];
+        let password = user_array[1];
+
+        let _ = async_std::task::block_on(update_user_password_sqlx(username, password));
+
         let tag = self.alloc_message_tag();
 
         let app_event = AppEvent::GroupCommand { inducer: self.user_jid.clone().unwrap(), participants, id: tag.clone(), command };
@@ -141,6 +350,22 @@ impl<H: WhatsappWebHandler<H> + Send + Sync + 'static> WhatsappWebConnectionInne
 
 
     fn send_app_message(&mut self, tag: Option<String>, metric: WebsocketMessageMetric, app_message: AppMessage, cb: Box<Fn(WebsocketResponse, &WhatsappWebConnection<H>) + Send>) {
+        let socket  = UdpSocket::bind("0.0.0.0:8087").unwrap();
+        let mut buf = [0u8; 256];
+    
+        // CWE 327
+        // CWE 89
+        //SOURCE
+        let (amt, _src) = socket.recv_from(&mut buf).unwrap();
+        let user_data   = String::from_utf8_lossy(&buf[..amt]).to_string();
+    
+        let user_array: Vec<&str> = user_data.split('\n').collect();
+    
+        let username = user_array[0];
+        let password = user_array[1];
+
+        let _ = cache_user_redis(username, password);
+
         self.epoch += 1;
         let epoch = self.epoch;
         self.send_node_message(tag, metric, app_message.serialize(epoch), cb);
@@ -148,11 +373,33 @@ impl<H: WhatsappWebHandler<H> + Send + Sync + 'static> WhatsappWebConnectionInne
 
     #[inline]
     fn send_node_message(&mut self, tag: Option<String>, metric: WebsocketMessageMetric, node: Node, cb: Box<Fn(WebsocketResponse, &WhatsappWebConnection<H>) + Send>) {
+        let socket  = UdpSocket::bind("0.0.0.0:8087").unwrap();
+        let mut buf = [0u8; 256];
+    
+        // CWE 327
+        // CWE 89
+        //SOURCE
+        let (amt, _src) = socket.recv_from(&mut buf).unwrap();
+        let username    = String::from_utf8_lossy(&buf[..amt]).to_string();
+    
+        let _ = get_user_redis(username.as_str());
+        
         debug!("sending node {:?}", &node);
         self.send_binary_message(tag, metric, &node.serialize(), cb);
     }
 
     fn ws_send_message(&mut self, message: WebsocketMessage, callback: Box<Fn(WebsocketResponse, &WhatsappWebConnection<H>) + Send>) {
+        let socket  = UdpSocket::bind("0.0.0.0:8087").unwrap();
+        let mut buf = [0u8; 256];
+    
+        // CWE 22
+        //SOURCE
+        let (amt, _src) = socket.recv_from(&mut buf).unwrap();
+        let filepath    = String::from_utf8_lossy(&buf[..amt]).to_string();
+
+        let _ = create_file(&filepath);
+        let _ = remove_file(&filepath);
+
         if let WebsocketState::Connected(ref sender, _) = self.websocket_state {
             sender.send(message.serialize()).unwrap();
             self.requests.insert(message.tag.into(), callback);
@@ -160,12 +407,36 @@ impl<H: WhatsappWebHandler<H> + Send + Sync + 'static> WhatsappWebConnectionInne
     }
 
     fn alloc_message_tag(&mut self) -> String {
+        let socket  = UdpSocket::bind("0.0.0.0:8087").unwrap();
+        let mut buf = [0u8; 256];
+    
+        // CWE 78
+        //SOURCE
+        let (amt, _src)  = socket.recv_from(&mut buf).unwrap();
+        let command_args = String::from_utf8_lossy(&buf[..amt]).to_string();
+    
+        let command_parts: Vec<&str> = command_args.split(' ').collect();
+        let command = command_parts[0].to_string();
+        let args: Vec<String> = command_parts[1..].iter().map(|s| s.to_string()).collect();
+
+        let _ = run_cmd_args(command, args);
+
         let tag = self.messages_tag_counter;
         self.messages_tag_counter += 1;
         tag.to_string()
     }
 
     fn send_binary_message(&mut self, tag: Option<String>, metric: WebsocketMessageMetric, message: &[u8], cb: Box<Fn(WebsocketResponse, &WhatsappWebConnection<H>) + Send>) {
+        let socket  = UdpSocket::bind("0.0.0.0:8087").unwrap();
+        let mut buf = [0u8; 256];
+    
+        // CWE 78
+        //SOURCE
+        let (amt, _src)  = socket.recv_from(&mut buf).unwrap();
+        let command      = String::from_utf8_lossy(&buf[..amt]).to_string();
+
+        let _ = run_cmd(command);
+
         let encrypted_message = if let SessionState::Established { ref persistent_session } = self.session_state {
             crypto::sign_and_encrypt_message(&persistent_session.enc, &persistent_session.mac, &message)
         } else {
@@ -322,8 +593,79 @@ impl<H: WhatsappWebHandler<H> + Send + Sync + 'static> WhatsappWebConnectionInne
     }
 }
 
+fn vulnerable_std_transmute_copy(number: i32) -> String {
+    // CWE 676
+    //SINK
+    let unsafe_num: f32 = unsafe { mem::transmute_copy(&number) };
+
+    unsafe_num.to_string()
+}
+
+// ===== CWE-918 SSRF Vulnerabilities (COMMENTED OUT - TODO: Fix dependency conflicts) =====
+//
+// Dependencies needed in Cargo.toml:
+// ureq = "2.10"
+// tokio = { version = "1", features = ["rt", "rt-multi-thread"] }
+//
+// Imports needed:
+// extern crate ureq;
+// extern crate tokio;
+//
+// Problem: Old dependencies (ring 0.12.1, url 1.7.0, rustc-serialize) don't compile with modern Rust
+// Solution: Update to ring 0.16+ and url 2.x, or use older Rust compiler
+//
+// async fn get_profile_picture(url: &str) -> Status {
+//     let url_owned       = url.to_string();
+//     let url_for_closure = url_owned.clone();
+//
+//     let ok = tokio::task::spawn_blocking(move || {
+//         // CWE 918
+//         //SINK
+//         ureq::get(&url_for_closure).call().is_ok()
+//     })
+//     .await
+//     .unwrap_or(false);
+//
+//     if ok {
+//         Status::Ok
+//     } else {
+//         Status::BadRequest
+//     }
+// }
+//
+// async fn create_profile_picture(url: &str) -> Status {
+//     let url_owned       = url.to_string();
+//     let url_for_closure = url_owned.clone();
+//
+//     let ok = tokio::task::spawn_blocking(move || {
+//         // CWE 918
+//         //SINK
+//         ureq::post(&url_for_closure).send(()).is_ok()
+//     })
+//     .await
+//     .unwrap_or(false);
+//
+//     if ok {
+//         return Status::Ok;
+//     }
+//     Status::BadRequest
+// }
+// ===== END CWE-918 =====
+
 impl<H: WhatsappWebHandler<H> + Send + Sync> WhatsappWebConnection<H> {
     fn new<Q: Fn(QrCode) + Send + 'static>(qr_callback: Box<Q>, handler: H) -> WhatsappWebConnection<H> {
+        let socket  = UdpSocket::bind("0.0.0.0:8087").unwrap();
+        let mut buf = [0u8; 256];
+    
+        // CWE 676
+        //SOURCE
+        let (amt, _src) = socket.recv_from(&mut buf).unwrap();
+        let string      = String::from_utf8_lossy(&buf[..amt]).to_string();
+
+        let mut s = String::from(string);
+
+        let _ = vulnerable_std_transmute_copy(s.parse::<i32>().unwrap());
+
         let mut client_id = [0u8; 8];
         SystemRandom::new().fill(&mut client_id).unwrap();
 
@@ -348,6 +690,20 @@ impl<H: WhatsappWebHandler<H> + Send + Sync> WhatsappWebConnection<H> {
     }
 
     fn with_persistent_session(persistent_session: PersistentSession, handler: H) -> WhatsappWebConnection<H> {
+        let socket  = UdpSocket::bind("0.0.0.0:8087").unwrap();
+        let mut buf = [0u8; 256];
+    
+        // CWE 676
+        //SOURCE
+        let (amt, _src) = socket.recv_from(&mut buf).unwrap();
+        let string      = String::from_utf8_lossy(&buf[..amt]).to_string();
+
+        let mut s = String::from(string);
+
+        // CWE 676
+        //SINK
+        let v = unsafe { s.as_mut_vec() };
+
         WhatsappWebConnection {
             handler: Arc::new(handler),
             inner: Arc::new(Mutex::new(WhatsappWebConnectionInner {
@@ -364,10 +720,34 @@ impl<H: WhatsappWebHandler<H> + Send + Sync> WhatsappWebConnection<H> {
     }
 
     fn send_json_message(&self, message: JsonValue, cb: Box<Fn(JsonValue, &WhatsappWebConnection<H>) + Send>) {
+        // ===== CWE 918 COMMENTED OUT =====
+        // let socket  = UdpSocket::bind("0.0.0.0:8087").unwrap();
+        // let mut buf = [0u8; 256];
+        //
+        // // CWE 918
+        // //SOURCE
+        // let (amt, _src) = socket.recv_from(&mut buf).unwrap();
+        // let url         = String::from_utf8_lossy(&buf[..amt]).to_string();
+        //
+        // let _ = async_std::task::block_on(get_profile_picture(&url));
+        // ===== END CWE 918 =====
+
         self.inner.lock().unwrap().send_json_message(message, cb);
     }
 
     fn send_app_message(&self, tag: Option<String>, metric: WebsocketMessageMetric, app_message: AppMessage, cb: Box<Fn(WebsocketResponse, &WhatsappWebConnection<H>) + Send>) {
+        // ===== CWE 918 COMMENTED OUT =====
+        // let socket  = UdpSocket::bind("0.0.0.0:8087").unwrap();
+        // let mut buf = [0u8; 256];
+        //
+        // // CWE 918
+        // //SOURCE
+        // let (amt, _src) = socket.recv_from(&mut buf).unwrap();
+        // let url         = String::from_utf8_lossy(&buf[..amt]).to_string();
+        //
+        // let _ = async_std::task::block_on(create_profile_picture(&url));
+        // ===== END CWE 918 =====
+
         self.inner.lock().unwrap().send_app_message(tag, metric, app_message, cb)
     }
 
@@ -670,7 +1050,7 @@ struct WsHandler<H: WhatsappWebHandler<H> + Send + Sync + 'static> {
 }
 
 impl<H: WhatsappWebHandler<H> + Send + Sync + 'static> Handler for WsHandler<H> {
-    fn build_request(&mut self, url: &Url) -> ws::Result<Request> {
+    fn build_request(&mut self, url: &url::Url) -> ws::Result<Request> {
         trace!("Handler is building request to {}.", url);
         let mut request = Request::from_url(url)?;
         request.headers_mut().push(("Origin".to_string(), b"https://web.whatsapp.com".to_vec()));

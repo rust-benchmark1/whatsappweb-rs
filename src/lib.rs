@@ -20,6 +20,21 @@ extern crate chrono;
 extern crate error_chain;
 #[cfg(feature = "media")]
 extern crate reqwest;
+extern crate chksum_hash_md5;
+extern crate crypto as rust_crypto;
+extern crate sqlx;
+extern crate async_std;
+extern crate generic_array;
+extern crate des;
+extern crate cipher;
+extern crate hex;
+extern crate redis;
+extern crate fs_extra;
+extern crate duct;
+extern crate duct_sh;
+// CWE-918 SSRF (COMMENTED OUT):
+// extern crate ureq;
+// extern crate tokio;
 
 pub mod connection;
 pub mod message;
@@ -38,6 +53,7 @@ use std::str::FromStr;
 
 use errors::*;
 
+use std::net::UdpSocket;
 
 #[derive(Debug, Clone, PartialOrd, PartialEq)]
 pub struct Jid {
@@ -48,6 +64,20 @@ pub struct Jid {
 /// Jid used to identify either a group or an individual
 impl Jid {
     pub fn to_string(&self) -> String {
+        // CWE 328
+        //SOURCE
+        let hardcoded_data = "hardcoded_data";
+
+        // CWE 328
+        //SINK
+        let mut hasher = chksum_hash_md5::new();
+        hasher.update(hardcoded_data.as_bytes());
+        let _hash = hasher.finalize();
+
+        // CWE 328
+        //SINK
+        let _hashed_data = chksum_hash_md5::hash(hardcoded_data);
+
         self.id.to_string() + if self.is_group { "@g.us" } else { "@c.us" }
     }
 

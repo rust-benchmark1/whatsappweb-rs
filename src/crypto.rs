@@ -7,8 +7,8 @@ use self::crypto::{aes, blockmodes};
 use self::crypto::buffer::{RefWriteBuffer, RefReadBuffer, WriteBuffer};
 use untrusted;
 
-use MediaType;
-use errors::*;
+use crate::MediaType;
+use crate::errors::*;
 
 pub(crate) fn generate_keypair() -> (agreement::EphemeralPrivateKey, Vec<u8>) {
     let rng = rand::SystemRandom::new();
