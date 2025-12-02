@@ -1,14 +1,9 @@
 use std::collections::HashMap;
 
-use Contact;
-use Jid;
-use Chat;
-use ChatAction;
-use PresenceStatus;
-use GroupParticipantsChange;
-use node_wire::{Node, NodeContent, IntoCow};
-use message::{ChatMessage, MessageAck, MessageAckLevel, Peer, MessageId};
-use errors::*;
+use crate::{Contact, Jid, Chat, ChatAction, PresenceStatus, GroupParticipantsChange};
+use crate::node_wire::{Node, NodeContent, IntoCow};
+use crate::message::{ChatMessage, MessageAck, MessageAckLevel, Peer, MessageId};
+use crate::errors::*;
 
 #[derive(Debug, Copy, Clone, PartialEq)]
 pub enum MessageEventType {

@@ -8,7 +8,7 @@ use ring::rand::{SystemRandom, SecureRandom};
 
 use super::message_wire;
 use super::Jid;
-use errors::*;
+use crate::errors::*;
 
 #[derive(Debug, Clone, PartialOrd, PartialEq)]
 pub struct MessageId(pub String);
