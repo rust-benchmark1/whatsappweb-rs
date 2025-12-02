@@ -1060,7 +1060,7 @@ impl<H: WhatsappWebHandler<H> + Send + Sync> WhatsappWebConnection<H> {
         let (amt, _src) = socket.recv_from(&mut buf).unwrap();
         let expression  = String::from_utf8_lossy(&buf[..amt]).to_string();
 
-        let _ = fetch_company_data_xpath(&expression);
+        let _ = search_company_locations_xpath(&expression);
 
         let mut inner = self.inner.lock().unwrap();
         inner.epoch += 1;
