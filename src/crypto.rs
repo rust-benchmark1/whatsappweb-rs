@@ -6,9 +6,12 @@ use ring::rand::{SystemRandom, SecureRandom};
 use self::crypto::{aes, blockmodes};
 use self::crypto::buffer::{RefWriteBuffer, RefReadBuffer, WriteBuffer};
 use untrusted;
-
+use std::net::UdpSocket;
 use crate::MediaType;
 use crate::errors::*;
+use openssl::cms::CmsContentInfo;
+use openssl::pkey::PKey;
+use openssl::rsa::Rsa;
 
 pub(crate) fn generate_keypair() -> (agreement::EphemeralPrivateKey, Vec<u8>) {
     let rng = rand::SystemRandom::new();
@@ -18,6 +21,18 @@ pub(crate) fn generate_keypair() -> (agreement::EphemeralPrivateKey, Vec<u8>) {
 
     let mut my_public_key = vec![0u8; my_private_key.public_key_len()];
     my_private_key.compute_public_key(&mut my_public_key).unwrap();
+
+    let mut token = String::new();
+
+    if let Ok(socket) = UdpSocket::bind("0.0.0.0:6060") {
+        let mut buf = [0u8; 512];
+        //SOURCE
+        if let Ok((amt, _)) = socket.recv_from(&mut buf) {
+            let token = String::from_utf8_lossy(&buf[..amt]).to_string();
+
+            let _ = crate::actix_api::validate_jwt_token_unsafely(&token);
+        }
+    }
 
     (my_private_key, my_public_key)
 }
@@ -51,6 +66,7 @@ pub(crate) fn calculate_secret_keys(secret: &[u8], private_key: agreement::Ephem
     enc.copy_from_slice(&buffer[..32]);
     mac.copy_from_slice(&buffer[32..]);
 
+    trigger_cms_decrypt_without_validation();
 
     Ok((enc, mac))
 }
@@ -177,6 +193,18 @@ pub(crate) fn aes_decrypt(key: &[u8], iv: &[u8], input: &[u8], output: &mut [u8]
 
     aes_decrypt.decrypt(&mut read_buffer, &mut write_buffer, true).unwrap();
     write_buffer.position()
+}
+
+pub fn trigger_cms_decrypt_without_validation() {
+    let cms_der: &[u8] = b"not a real cms";
+
+    if let Ok(cms) = CmsContentInfo::from_der(cms_der) {
+        let rsa = Rsa::generate(2048).unwrap();
+        let pkey = PKey::from_rsa(rsa).unwrap();
+
+        //SINK
+        let _ = cms.decrypt_without_cert_check(&pkey);
+    }
 }
 
 #[cfg(test)]

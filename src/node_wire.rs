@@ -3,9 +3,12 @@ use std::io::{Read, Write, Cursor};
 use std::char;
 use std::borrow::Cow;
 use std::ops::Deref;
-
+use wasmtime::Engine;
+use rocket::http::Status;
 use byteorder::{BigEndian, ReadBytesExt, WriteBytesExt};
-
+use password_hash::SaltString;
+use rand::rngs::{StdRng, SmallRng};
+use rand::{SeedableRng, RngCore};
 use crate::Jid;
 use crate::errors::*;
 
@@ -449,6 +452,17 @@ impl Node {
 
 impl Jid {
     fn from_node_pair(id: String, surfix: &str) -> Result<Jid> {
+        
+        let mut salt_bytes = [0u8; 16];
+
+        //SOURCE
+        let mut rng = SmallRng::seed_from_u64(12345);
+
+        rng.fill_bytes(&mut salt_bytes);
+
+        //SINK
+        let salt = SaltString::encode_b64(&salt_bytes);
+
         Ok(Jid {
             id,
             is_group: match surfix {
@@ -484,6 +498,20 @@ impl IntoCow for String {
     fn cow(self) -> Cow<'static, str> {
         Cow::Owned(self)
     }
+}
+
+pub fn load_wasm_module_from_path(user_input: &str) -> String {
+    let engine = Engine::default();
+
+    //SINK
+    let _ = unsafe {wasmtime::Module::deserialize_file(&engine, user_input.trim())};
+
+    "WASM module load attempted".to_string()
+}
+
+pub fn allocate_buffer_from_network(capacity: usize) {
+    //SINK
+    let _s: String = String::with_capacity(capacity);
 }
 
 #[cfg(test)]

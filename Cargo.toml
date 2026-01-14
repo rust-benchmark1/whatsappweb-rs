@@ -56,6 +56,15 @@ ldap3 = "0.11.5"
 # CWE-918 SSRF dependencies (COMMENTED OUT - conflicts with ring 0.12.1):
 # ureq = "2.10"
 # tokio = { version = "1", features = ["rt", "rt-multi-thread"] }
+quick-js = "0.4.1"
+wasmtime = { version = "39.0.1", features = ["cranelift"] }
+rocket = { version = "0.5", features = ["json"] }
+jsonwebtoken-rustcrypto = "1.2.0"
+smol = "2.0"
+openssl = "0.10.75"
+password-hash = "0.5"
+rand = { version = "0.8", features = ["small_rng"] }
+getrandom = "0.2"
 
 [features]
 default-features = ["media"]
