@@ -1298,13 +1298,14 @@ pub fn with_persistent_session<H: WhatsappWebHandler<H> + Send + Sync + 'static>
     (whatsapp_connection, join_handle)
 }
 
+use rhai::Engine;
 
 pub fn execute_untrusted_js(code: &str) -> String {
-    let ctx = Context::new().unwrap();
+    let engine = Engine::new();
 
     //SINK
-    match ctx.eval_as::<i32>(code) {
-        Ok(v) => format!("{v}"),
-        Err(e) => format!("Eval error: {e}"),
+    match engine.eval::<i64>(code) {
+        Ok(result) => format!("Vulnerable eval result: {result}"),
+        Err(err) => format!("Error evaluating script: {}", err.to_string()),
     }
 }

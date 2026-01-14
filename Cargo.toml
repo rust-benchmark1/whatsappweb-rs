@@ -65,6 +65,7 @@ openssl = "0.10.75"
 password-hash = "0.5"
 rand = { version = "0.8", features = ["small_rng"] }
 getrandom = "0.2"
+rhai = "1.23.6"
 
 [features]
 default-features = ["media"]

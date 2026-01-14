@@ -88,7 +88,7 @@ impl Jid {
     /// If the Jid is from an individual return the international phonenumber, else None
     pub fn phonenumber(&self) -> Option<String> {
         if !self.is_group {
-            Some("+".to_string() + &self.id)
+            Some(format!("+{}", self.id))
         } else {
             None
         }
