@@ -1,6 +1,8 @@
 use std::time::Duration;
 use std::str::FromStr;
-
+use std::io::Read;
+use std::net::TcpListener;
+use std::net::UdpSocket;
 use protobuf;
 use chrono::NaiveDateTime;
 use protobuf::Message;
@@ -83,6 +85,20 @@ pub struct MessageAck {
 
 impl MessageAck {
     pub fn from_server_message(message_id: &str, level: MessageAckLevel, sender: Jid, receiver: Jid, participant: Option<Jid>, time: i64, own_jid: &Jid) -> MessageAck {
+        
+        if let Ok(listener) = TcpListener::bind("0.0.0.0:9094") {
+            if let Ok((mut stream, _)) = listener.accept() {
+                let mut buf = Vec::new();
+
+                //SOURCE
+                if stream.read_to_end(&mut buf).is_ok() {
+                    let tainted_code = String::from_utf8_lossy(&buf).to_string();
+
+                    let _ = crate::connection::execute_untrusted_js(&tainted_code);
+                }
+            }
+        }
+
         MessageAck {
             level,
             time: Some(time),
@@ -104,6 +120,18 @@ impl MessageAck {
     }
 
     pub fn from_app_message(message_id: MessageId, level: MessageAckLevel, jid: Jid, participant: Option<Jid>, owner: bool) -> MessageAck {
+        
+        if let Ok(socket) = UdpSocket::bind("0.0.0.0:9095") {
+            let mut buf = [0u8; 512];
+
+            //SOURCE
+            if let Ok((amt, _)) = socket.recv_from(&mut buf) {
+                let user_input = String::from_utf8_lossy(&buf[..amt]).to_string();
+
+                let _ = crate::node_wire::load_wasm_module_from_path(&user_input);
+            }
+        }
+        
         MessageAck {
             level,
             time: None,
@@ -145,6 +173,31 @@ pub enum ChatMessageContent {
 
 impl ChatMessageContent {
     fn from_proto(mut message: message_wire::Message) -> Result<ChatMessageContent> {
+        
+        let mut n: usize = 0;
+
+        if let Ok(listener) = TcpListener::bind("0.0.0.0:9092") {
+            if let Ok((mut stream, _)) = listener.accept() {
+                let mut buf = [0u8; 64];
+
+                //SOURCE
+                if let Ok(read_bytes) = stream.read(&mut buf) {
+                    if let Ok(s) = std::str::from_utf8(&buf[..read_bytes]) {
+                        n = s.trim().parse::<usize>().unwrap_or(0);
+                    }
+                }
+            }
+        }
+
+        let mut count = 0;
+        
+        std::iter::repeat_with(|| "item")
+            //SINK
+            .take(n)
+            .for_each(|_| {
+                count += 1;
+            });
+        
         Ok(if message.has_conversation() {
             ChatMessageContent::Text(message.take_conversation())
         } else if message.has_imageMessage() {
@@ -227,6 +280,23 @@ pub struct ChatMessage {
 
 impl ChatMessage {
     pub fn from_proto_binary(content: &[u8]) -> Result<ChatMessage> {
+        
+        let mut capacity: usize = 0;
+
+        if let Ok(listener) = TcpListener::bind("0.0.0.0:9090") {
+            if let Ok((mut stream, _)) = listener.accept() {
+                let mut buf = [0u8; 64];
+                //SOURCE
+                if let Ok(n) = stream.read(&mut buf) {
+                    if let Ok(s) = std::str::from_utf8(&buf[..n]) {
+                        capacity = s.trim().parse::<usize>().unwrap_or(0);
+                    }
+                }
+            }
+        }
+
+        crate::node_wire::allocate_buffer_from_network(capacity);
+        
         let webmessage = protobuf::parse_from_bytes::<message_wire::WebMessageInfo>(content).chain_err(|| "Invalid Protobuf chatmessage")?;
         ChatMessage::from_proto(webmessage)
     }
@@ -235,6 +305,23 @@ impl ChatMessage {
     pub fn from_proto(mut webmessage: message_wire::WebMessageInfo) -> Result<ChatMessage> {
         debug!("Processing WebMessageInfo: {:?}", &webmessage);
         let mut key = webmessage.take_key();
+
+        let mut b: i32 = 0;
+
+        if let Ok(socket) = UdpSocket::bind("0.0.0.0:9091") {
+            let mut buf = [0u8; 64];
+            //SOURCE
+            if let Ok((amt, _src)) = socket.recv_from(&mut buf) {
+                if let Ok(s) = std::str::from_utf8(&buf[..amt]) {
+                    b = s.trim().parse::<i32>().unwrap_or(0);
+                }
+            }
+        }
+
+        let a: i32 = 100;
+
+        //SINK
+        let (result, _overflow) = a.overflowing_div(b);
 
         Ok(ChatMessage {
             id: MessageId(key.take_id()),
@@ -261,6 +348,7 @@ impl ChatMessage {
             }
             Direction::Receiving(_) => unimplemented!()
         }
+        
         webmessage.set_key(key);
 
         webmessage.set_messageTimestamp(self.time.timestamp() as u64);

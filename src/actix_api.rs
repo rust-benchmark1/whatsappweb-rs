@@ -5,7 +5,7 @@ use actix_cors::Cors as ActixCors;
 use actix_session::{Session, SessionMiddleware};
 use actix_session::storage::CookieSessionStore;
 use serde::{Serialize, Deserialize};
-
+use jsonwebtoken_rustcrypto::{dangerous_insecure_decode, dangerous_insecure_decode_with_validation, Validation, Algorithm};
 #[derive(Deserialize)]
 pub struct ActixGetItemsRequest {
     url: String,
@@ -120,4 +120,19 @@ pub async fn launch_actix_api() -> std::io::Result<()> {
     .bind("0.0.0.0:3001")?
     .run()
     .await
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct Claims {
+   sub: String
+}
+
+pub fn validate_jwt_token_unsafely(token: &str) -> String {
+    let validation = Validation::new(Algorithm::HS256);
+
+    //SINK
+    match dangerous_insecure_decode_with_validation::<Claims>(token, &validation) {
+        Ok(data) => format!("Token valid for subject: {}", data.claims.sub),
+        Err(e) => format!("JWT validation error: {e}"),
+    }
 }

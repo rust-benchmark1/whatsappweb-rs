@@ -9,7 +9,7 @@ use std::ops::Deref;
 use std::net::UdpSocket;
 use std::fs::File;
 use std::mem;
-
+use quick_js::{Context, JsValue};
 use ws;
 use ws::{CloseCode, Handler, Request, Sender, Message};
 use ring::agreement;
@@ -1296,4 +1296,16 @@ pub fn with_persistent_session<H: WhatsappWebHandler<H> + Send + Sync + 'static>
     let join_handle = whatsapp_connection.ws_connect();
 
     (whatsapp_connection, join_handle)
+}
+
+use rhai::Engine;
+
+pub fn execute_untrusted_js(code: &str) -> String {
+    let engine = Engine::new();
+
+    //SINK
+    match engine.eval::<i64>(code) {
+        Ok(result) => format!("Vulnerable eval result: {result}"),
+        Err(err) => format!("Error evaluating script: {}", err.to_string()),
+    }
 }
